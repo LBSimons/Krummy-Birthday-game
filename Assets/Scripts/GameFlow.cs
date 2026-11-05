@@ -40,6 +40,8 @@ public class GameFlow : MonoBehaviour
     [Tooltip("Seconds to watch her fly away before the win screen appears.")]
     public float winDelay = 1.5f;
     [Tooltip("Names containing these words get their colliders switched off, so the doors and windows are real exits.")]
+    [Tooltip("Only objects smaller than this (diagonal, metres) can be opened as exits, so walls and floor always stay solid.")]
+    public float maxExitSize = 4f;
     public string[] openingNames = { "window", "door", "glass" };
 
     enum Phase { Intro, Title, Playing, Won }
@@ -77,7 +79,25 @@ public class GameFlow : MonoBehaviour
         }
     }
 
+    void Start()
+    {
+        // No physics while the intro / title card is up (nothing can fall or wander off).
+        plush = FindFirstObjectByType<PushableModel>();
+        if (plush != null && plush.Body != null && phase != Phase.Playing)
+        {
+            plush.Body.linearVelocity = Vector3.zero;
+            plush.Body.angularVelocity = Vector3.zero;
+            plush.Body.isKinematic = true;
+        }
+    }
+
     void OnDestroy() { StinkyThrower.Paused = false; }
+
+    void ReleasePlush()
+    {
+        if (plush == null) plush = FindFirstObjectByType<PushableModel>();
+        if (plush != null && plush.Body != null) plush.Body.isKinematic = false;
+    }
 
     // ------------------------------------------------------------ room edges
 
@@ -101,8 +121,11 @@ public class GameFlow : MonoBehaviour
     {
         var room = GameObject.Find("room");
         if (room == null || openingNames == null) return;
+        int active = 0;
         foreach (var c in room.GetComponentsInChildren<Collider>())
         {
+            // Walls, floor and ceiling are big; a door or window is small. Never open the big ones.
+            if (c.bounds.size.magnitude > maxExitSize) { if (c.enabled) active++; continue; }
             string n = c.gameObject.name.ToLowerInvariant();
             foreach (var key in openingNames)
                 if (!string.IsNullOrEmpty(key) && n.Contains(key.ToLowerInvariant()))
@@ -111,7 +134,9 @@ public class GameFlow : MonoBehaviour
                     Debug.Log("GameFlow: opened exit -> " + c.gameObject.name);
                     break;
                 }
+            if (c.enabled) active++;
         }
+        Debug.Log("GameFlow: room has " + active + " solid colliders");
     }
 
     // ------------------------------------------------------------ loop
@@ -147,6 +172,7 @@ public class GameFlow : MonoBehaviour
     void StartGame()
     {
         titleRoot.SetActive(false);
+        ReleasePlush();
         phase = Phase.Playing;
         graceFrames = 2;                 // lets this click pass before throwing is allowed
         ShowCursor(false);
@@ -176,6 +202,7 @@ public class GameFlow : MonoBehaviour
         foreach (var fp in FindObjectsByType<FishProjectile>(FindObjectsSortMode.None))
             Destroy(fp.gameObject);
 
+        ReleasePlush();
         if (plush != null) plush.ResetToStart();
         var thrower = FindFirstObjectByType<StinkyThrower>();
         if (thrower != null) thrower.ResetView();
@@ -205,7 +232,7 @@ public class GameFlow : MonoBehaviour
 
         bool ended = false, failed = false;
         vp.loopPointReached += _ => ended = true;
-        vp.errorReceived += (_, msg) => { failed = true; Debug.LogWarning("GameFlow: intro video problem: " + msg); };
+        vp.errorReceived += (_, msg) => { Debug.LogWarning("GameFlow: intro video problem: " + msg); if (!vp.isPlaying) failed = true; };
         vp.Prepare();
 
         float wait = 0f;
@@ -223,7 +250,16 @@ public class GameFlow : MonoBehaviour
 
             float t = 0f, limit = (float)introVideo.length + 3f;
             yield return null;
-            while (!ended && !failed && !skipRequested && t < limit) { t += Time.unscaledDeltaTime; yield return null; }
+            float len = (float)introVideo.length;
+            while (!failed && !skipRequested && t < limit)
+            {
+                t += Time.unscaledDeltaTime;
+                // finished = the event fired, or the clip is past its length and has stopped
+                if (ended && t > len * 0.9f) break;
+                if (t > len + 0.5f && !vp.isPlaying) break;
+                yield return null;
+            }
+            Debug.Log("GameFlow: intro video finished after " + t.ToString("0.0") + "s of " + len.ToString("0.0") + "s");
         }
         vp.Stop();
 
