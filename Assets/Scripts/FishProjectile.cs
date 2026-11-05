@@ -2,6 +2,10 @@ using UnityEngine;
 using PhysMat = UnityEngine.PhysicsMaterial;
 using PhysCombine = UnityEngine.PhysicsMaterialCombine;
 
+/// <summary>
+/// Goes on each thrown stinky. Gives it a Rigidbody (if the prefab doesn't have one), makes it
+/// bouncy, and plays a random sound from the SoundBank whenever it hits something.
+/// </summary>
 public class FishProjectile : MonoBehaviour
 {
     [Header("Bounce")]
@@ -16,13 +20,37 @@ public class FishProjectile : MonoBehaviour
     [Tooltip("Minimum seconds between sounds from this one fish.")]
     public float soundCooldown = 0.05f;
 
+    [Header("Cleanup / quiet")]
+    [Tooltip("A stinky only makes noise for this many seconds after it is thrown.")]
+    public float soundWindow = 5f;
+    [Tooltip("Once a stinky has been lying still for this long it is removed (0 = never).")]
+    public float restDestroyTime = 1.5f;
+
+    // Hits slower than this are ignored for sound (new names so old saved values don't override).
+    const float QuietSpeed = 2.5f;
+
     static PhysMat sharedMat;
-    float lastSoundTime = -10f;
+    float spawnTime, restTimer;
+    Rigidbody body;
 
     void Awake()
     {
-        // Fast fish shouldn't tunnel through walls.
-        GetComponent<Rigidbody>().collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+        spawnTime = Time.time;
+        Setup();
+    }
+
+    /// <summary>
+    /// Safe to call more than once. Makes sure there is a Rigidbody and that every collider
+    /// (including ones added after this script woke up) uses the bouncy material.
+    /// </summary>
+    public void Setup()
+    {
+        var rb = GetComponent<Rigidbody>();
+        if (rb == null) rb = gameObject.AddComponent<Rigidbody>();
+        body = rb;
+
+        // Fast stinkies shouldn't tunnel through walls.
+        rb.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
 
         if (sharedMat == null)
         {
@@ -31,7 +59,7 @@ public class FishProjectile : MonoBehaviour
                 bounciness = bounciness,
                 dynamicFriction = friction,
                 staticFriction = friction,
-                // Maximum = the fish bounces whatever surface it hits.
+                // Maximum = it bounces whatever surface it hits.
                 bounceCombine = PhysCombine.Maximum,
                 frictionCombine = PhysCombine.Minimum
             };
@@ -43,27 +71,23 @@ public class FishProjectile : MonoBehaviour
 
     void Update()
     {
-        // Safety net if a fish ever escapes the room.
+        // Safety net if one ever escapes the room.
         if (transform.position.y < -100f) Destroy(gameObject);
+
+        // Remove stinkies that have stopped moving, so nothing lies around making noise.
+        if (restDestroyTime > 0f && body != null && Time.time - spawnTime > 1f)
+        {
+            if (body.linearVelocity.sqrMagnitude < 0.04f) restTimer += Time.deltaTime; else restTimer = 0f;
+            if (restTimer > restDestroyTime) Destroy(gameObject);
+        }
     }
 
+    /// <summary>Raised on every hit; StinkyThrower uses it to know when the plush was hit.</summary>
+    public static event System.Action<FishProjectile, Collision> Hit;
+
+    // Stinkies are silent now: the krum plush makes the noise (see PushableModel).
     void OnCollisionEnter(Collision c)
     {
-        float speed = c.relativeVelocity.magnitude;
-        if (speed < minImpactSpeed) return;
-        if (Time.time - lastSoundTime < soundCooldown) return;
-
-        // Fish-vs-fish: both fish get this callback, so only the one with the
-        // lower instance ID makes the noise (otherwise you'd hear it twice).
-        var other = c.collider.GetComponentInParent<FishProjectile>();
-        if (other != null && other.GetInstanceID() < GetInstanceID()) return;
-
-        lastSoundTime = Time.time;
-
-        Vector3 point = c.contactCount > 0 ? c.GetContact(0).point : transform.position;
-        float loudness = Mathf.Lerp(0.3f, 1f, Mathf.Clamp01(speed / fullVolumeSpeed));
-
-        if (SoundBank.Instance != null)
-            SoundBank.Instance.PlayRandom(point, loudness);
+        Hit?.Invoke(this, c);
     }
 }

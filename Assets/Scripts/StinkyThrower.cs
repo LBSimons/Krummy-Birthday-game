@@ -49,6 +49,8 @@ public class StinkyThrower : MonoBehaviour
     public float spawnDistance = 0.7f;
     [Tooltip("Oldest stinkies are removed past this number.")]
     public int maxStinkies = 100;
+    [Tooltip("Each stinky disappears this many seconds after being thrown. 0 = never.")]
+    public float stinkyLifetime = 8f;
 
     [Header("Chase camera")]
     public float followDistance = 3.5f;
@@ -69,17 +71,23 @@ public class StinkyThrower : MonoBehaviour
     [Tooltip("Keeps the chase camera from poking through walls.")]
     public float cameraWallPadding = 0.3f;
 
+    /// <summary>Set by GameFlow while the title card / win screen is up.</summary>
+    public static bool Paused;
+
     State state = State.Aiming;
     Transform camT;
-    Vector3 homePos;
+    Vector3 homePos, initHomePos;
+    float initYaw, initPitch;
     float baseYaw, basePitch, yawOffset, pitchOffset;
 
     Rigidbody followRb;
+    bool followingModel;
     Vector3 followDir = Vector3.forward;
     Vector3 camVel;
     float followTime, settleTimer, returnTimer, nextThrowTime;
 
     GameObject uiRoot;
+    PushableModel pushable;
     readonly Queue<GameObject> live = new Queue<GameObject>();
     readonly RaycastHit[] hitBuffer = new RaycastHit[16];
 
@@ -104,10 +112,24 @@ public class StinkyThrower : MonoBehaviour
         Vector3 e = camT.eulerAngles;
         baseYaw = e.y;
         basePitch = e.x > 180f ? e.x - 360f : e.x;
+        initHomePos = homePos; initYaw = baseYaw; initPitch = basePitch;
 
-        EnsureBigModelCollider();
+        if (FindFirstObjectByType<GameFlow>() == null) new GameObject("Game Flow").AddComponent<GameFlow>();
+
+        SetupBigModel();
         BuildUi();
-        LockCursor(true);
+        if (!Paused) LockCursor(true);
+    }
+
+    /// <summary>Back to the starting view (used by the win screen's play-again).</summary>
+    public void ResetView()
+    {
+        homePos = initHomePos; baseYaw = initYaw; basePitch = initPitch;
+        yawOffset = pitchOffset = 0f;
+        followRb = null; followingModel = false;
+        state = State.Aiming;
+        SetUi(true);
+        if (camT != null) camT.SetPositionAndRotation(homePos, AimRotation);
     }
 
     void OnDisable()
@@ -116,11 +138,59 @@ public class StinkyThrower : MonoBehaviour
         Cursor.visible = true;
     }
 
-    void EnsureBigModelCollider()
+    void SetupBigModel()
     {
-        if (bigModel == null || bigModel.GetComponentInChildren<Collider>() != null) return;
-        foreach (var mf in bigModel.GetComponentsInChildren<MeshFilter>())
-            if (mf.sharedMesh != null) mf.gameObject.AddComponent<MeshCollider>();
+        // The slot may hold the prefab from the Project window instead of the model in the scene.
+        // If so, find the live one in the scene by name.
+        if (bigModel == null || !bigModel.gameObject.scene.IsValid())
+        {
+            var go = GameObject.Find(bigModel != null ? bigModel.name : "Scuffroll");
+            bigModel = go != null ? go.transform : null;
+        }
+        if (bigModel == null)
+        {
+            Debug.LogWarning("StinkyThrower: couldn't find the big model in the scene. Drag it into the Big Model slot from the Hierarchy.");
+            return;
+        }
+
+        // Make it a physics object so stinkies can knock it around.
+        pushable = bigModel.GetComponent<PushableModel>();
+        if (pushable == null) pushable = bigModel.gameObject.AddComponent<PushableModel>();
+        pushable.HitByStinky += OnModelHit;
+        FishProjectile.Hit += OnStinkyHit;
+        Debug.Log("StinkyThrower: following target ready -> " + bigModel.name);
+    }
+
+    // Backup check from the stinky's side, in case the model's own callback is missed.
+    void OnStinkyHit(FishProjectile fp, Collision c)
+    {
+        if (pushable == null || pushable.Body == null) return;
+        if (c.rigidbody == pushable.Body || c.collider.GetComponentInParent<PushableModel>() != null)
+            OnModelHit(c);
+    }
+
+    void OnDestroy()
+    {
+        if (pushable != null) pushable.HitByStinky -= OnModelHit;
+        FishProjectile.Hit -= OnStinkyHit;
+    }
+
+    // When a stinky hits the big model, the camera follows the model until it settles down.
+    void OnModelHit(Collision c)
+    {
+        BouncyRoom.Pulse();
+        if (pushable == null || pushable.Body == null) return;
+
+        if (state == State.Following && followingModel)
+        {
+            settleTimer = 0f;                                   // hit again: keep following
+            followTime = Mathf.Min(followTime, maxFollowTime * 0.5f);
+            return;
+        }
+        // Stinky reached the plush: switch the camera from the stinky to the plush.
+        Vector3 toModel = pushable.Body.worldCenterOfMass - camT.position;
+        if (state == State.Following) { followDir = new Vector3(toModel.x, 0f, toModel.z).normalized; }
+        BeginFollow(pushable.Body, toModel, true, state == State.Following);
     }
 
     void BuildUi()
@@ -190,19 +260,15 @@ public class StinkyThrower : MonoBehaviour
 
     void Update()
     {
+        if (Paused) return;   // title card or win screen is showing
+
         bool click = ClickPressed();
 
         if (EscPressed()) LockCursor(false);
-        else if (click && Cursor.lockState != CursorLockMode.Locked)
-        {
-            LockCursor(true);   // first click just grabs the mouse
-            click = false;
-        }
-        bool locked = Cursor.lockState == CursorLockMode.Locked;
+        else if (click && Cursor.lockState == CursorLockMode.None) LockCursor(true);   // re-grab after Esc, and still throws
 
         if (state == State.Aiming)
         {
-            if (!locked) return;
             Look();
             if (click && Time.time >= nextThrowTime) Throw();
         }
@@ -212,17 +278,34 @@ public class StinkyThrower : MonoBehaviour
         }
     }
 
+    // The pointer is always live: where the mouse is on the screen decides where you aim,
+    // so you never have to click first to "get" the pointer.
     void Look()
     {
-        Vector2 d = ReadMouseDelta() * lookSensitivity;
-        yawOffset = Mathf.Clamp(yawOffset + d.x, -maxYaw, maxYaw);
-        pitchOffset = Mathf.Clamp(pitchOffset + (invertY ? d.y : -d.y), -maxPitch, maxPitch);
+        Vector2 p = ReadMousePosition();
+        if (Screen.width <= 0 || Screen.height <= 0) return;
+        float nx = Mathf.Clamp01(p.x / Screen.width) * 2f - 1f;    // -1 .. 1
+        float ny = Mathf.Clamp01(p.y / Screen.height) * 2f - 1f;
+        float targetYaw = nx * maxYaw;
+        float targetPitch = (invertY ? ny : -ny) * maxPitch;
+        float k = 1f - Mathf.Exp(-20f * Time.deltaTime);          // tiny smoothing
+        yawOffset = Mathf.Lerp(yawOffset, targetYaw, k);
+        pitchOffset = Mathf.Lerp(pitchOffset, targetPitch, k);
+    }
+
+    static Vector2 ReadMousePosition()
+    {
+#if ENABLE_INPUT_SYSTEM
+        return Mouse.current != null ? Mouse.current.position.ReadValue() : new Vector2(Screen.width * 0.5f, Screen.height * 0.5f);
+#else
+        return Input.mousePosition;
+#endif
     }
 
     static void LockCursor(bool on)
     {
-        Cursor.lockState = on ? CursorLockMode.Locked : CursorLockMode.None;
-        Cursor.visible = !on;
+        Cursor.lockState = on ? CursorLockMode.Confined : CursorLockMode.None;
+        Cursor.visible = !on ? true : false;
     }
 
     static bool ClickPressed()
@@ -263,23 +346,34 @@ public class StinkyThrower : MonoBehaviour
         GameObject go = Instantiate(stinkyPrefab, pos, Random.rotation);
 
         PrepareStinky(go);
-        if (go.GetComponent<FishProjectile>() == null)
-            go.AddComponent<FishProjectile>();      // also adds the Rigidbody + bounce + hit sounds
+        var proj = go.GetComponent<FishProjectile>();
+        if (proj == null) proj = go.AddComponent<FishProjectile>();
+        proj.Setup();   // makes sure there is a Rigidbody and that every collider is bouncy
 
         var rb = go.GetComponent<Rigidbody>();
+        rb.isKinematic = false;
+        rb.useGravity = true;
         rb.interpolation = RigidbodyInterpolation.Interpolate;   // smooth for the chase camera
         rb.linearVelocity = dir * throwSpeed;
         rb.AddTorque(Random.insideUnitSphere * spinStrength, ForceMode.VelocityChange);
 
+        if (stinkyLifetime > 0f) Destroy(go, stinkyLifetime);
+
+        // Camera chases the stinky first; it switches to the plush when the stinky hits it.
+        if (state == State.Aiming)
+            BeginFollow(rb, dir, false, false);
+
         live.Enqueue(go);
+        while (live.Count > 0 && live.Peek() == null) live.Dequeue();   // forget ones that already expired
         while (live.Count > maxStinkies)
         {
             var oldest = live.Dequeue();
             if (oldest != null && oldest != go) Destroy(oldest);
         }
 
+        BouncyRoom.Pulse();   // room gets bouncy for a few seconds so the plush can't get stuck
+
         nextThrowTime = Time.time + throwCooldown;
-        BeginFollow(rb, dir);
     }
 
     // Moving stinkies need convex colliders; add them if the prefab has none.
@@ -314,21 +408,40 @@ public class StinkyThrower : MonoBehaviour
 
     // ------------------------------------------------------------ camera
 
-    void BeginFollow(Rigidbody rb, Vector3 throwDir)
+    void BeginFollow(Rigidbody rb, Vector3 throwDir, bool isModel, bool keepDir)
     {
         followRb = rb;
-        followDir = new Vector3(throwDir.x, 0f, throwDir.z);
-        if (followDir.sqrMagnitude < 0.001f) followDir = Vector3.forward;
-        followDir.Normalize();
+        followingModel = isModel;
+        if (!keepDir)
+        {
+            followDir = new Vector3(throwDir.x, 0f, throwDir.z);
+            if (followDir.sqrMagnitude < 0.001f) followDir = Vector3.forward;
+            followDir.Normalize();
+            camVel = Vector3.zero;
+        }
         followTime = 0f;
         settleTimer = 0f;
-        camVel = Vector3.zero;
         state = State.Following;
         SetUi(false);
     }
 
     void StartReturn()
     {
+        // The plush has settled: the player's camera moves to where the plush is
+        // (the spot the chase camera is at) and looks at it.
+        if (followingModel && followRb != null)
+        {
+            Vector3 look = followRb.worldCenterOfMass - camT.position;
+            if (look.sqrMagnitude > 0.01f)
+            {
+                Vector3 e = Quaternion.LookRotation(look.normalized).eulerAngles;
+                homePos = camT.position;
+                baseYaw = e.y;
+                basePitch = e.x > 180f ? e.x - 360f : e.x;
+                yawOffset = pitchOffset = 0f;
+            }
+        }
+        followingModel = false;
         state = State.Returning;
         returnTimer = 0f;
         camVel = Vector3.zero;
@@ -352,7 +465,8 @@ public class StinkyThrower : MonoBehaviour
         float dt = Time.deltaTime;
         Vector3 vel = followRb.linearVelocity;
         followTime += dt;
-        settleTimer = vel.magnitude < settleSpeed ? settleTimer + dt : 0f;
+        bool slow = vel.magnitude < settleSpeed && followRb.angularVelocity.magnitude < settleSpeed;
+        settleTimer = (followTime > 0.8f && slow) ? settleTimer + dt : 0f;
         if (settleTimer >= settleTime || followTime >= maxFollowTime) { StartReturn(); return; }
 
         // Slowly turn the "behind the stinky" direction towards where it is heading.
@@ -363,7 +477,7 @@ public class StinkyThrower : MonoBehaviour
             if (next.sqrMagnitude > 0.001f) followDir = next.normalized;
         }
 
-        Vector3 focus = followRb.transform.position;
+        Vector3 focus = followRb.worldCenterOfMass;
         Vector3 desired = focus - followDir * followDistance + Vector3.up * followHeight;
 
         // Pull the camera in front of any wall/object between it and the stinky.
@@ -377,6 +491,7 @@ public class StinkyThrower : MonoBehaviour
             for (int i = 0; i < n; i++)
             {
                 if (hitBuffer[i].collider.GetComponentInParent<FishProjectile>() != null) continue;
+                if (hitBuffer[i].collider.attachedRigidbody == followRb) continue;   // the model itself
                 if (hitBuffer[i].distance < best) best = hitBuffer[i].distance;
             }
             if (best < dist) desired = focus + rayDir * Mathf.Max(best - cameraWallPadding, 0.4f);
