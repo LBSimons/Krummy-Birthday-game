@@ -22,12 +22,30 @@ public class SoundBank : MonoBehaviour
     [Tooltip("1 = fully 3D (louder near the hit). 0 = flat, same volume everywhere.")]
     [Range(0f, 1f)] public float flatness3D = 0.2f;
 
+    [Tooltip("Also loads every clip inside Assets/Resources/KrumNoises, so you can just drop new sounds in that folder.")]
+    public string extraClipsFolder = "KrumNoises";
+
     AudioSource[] pool;
     int next;
+    readonly System.Collections.Generic.Queue<int> recent = new System.Collections.Generic.Queue<int>();
 
     void Awake()
     {
         Instance = this;
+
+        // Merge the clips from the Resources folder with the ones assigned in the Inspector.
+        if (!string.IsNullOrEmpty(extraClipsFolder))
+        {
+            var extra = Resources.LoadAll<AudioClip>(extraClipsFolder);
+            if (extra.Length > 0)
+            {
+                var all = new System.Collections.Generic.List<AudioClip>();
+                if (clips != null) foreach (var c in clips) if (c != null) all.Add(c);
+                foreach (var c in extra) if (!all.Contains(c)) all.Add(c);
+                clips = all.ToArray();
+            }
+            Debug.Log("SoundBank: " + (clips != null ? clips.Length : 0) + " clips loaded");
+        }
 
         // One child object per voice, so each sound can sit at its own hit position
         // without dragging other playing sounds along with it.
@@ -56,7 +74,14 @@ public class SoundBank : MonoBehaviour
     {
         if (clips == null || clips.Length == 0 || pool == null) return;
 
-        var clip = clips[Random.Range(0, clips.Length)];
+        // random clip, but not one of the last few played
+        int idx = Random.Range(0, clips.Length);
+        for (int tries = 0; tries < 8 && recent.Contains(idx) && clips.Length > 12; tries++)
+            idx = Random.Range(0, clips.Length);
+        recent.Enqueue(idx);
+        while (recent.Count > 6) recent.Dequeue();
+
+        var clip = clips[idx];
         if (clip == null) return;
 
         var src = pool[next];
