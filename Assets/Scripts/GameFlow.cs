@@ -39,9 +39,9 @@ public class GameFlow : MonoBehaviour
     public float escapeMargin = 0.4f;
     [Tooltip("Seconds to watch her fly away before the win screen appears.")]
     public float winDelay = 1.5f;
-    [Tooltip("Names containing these words get their colliders switched off, so the doors and windows are real exits.")]
     [Tooltip("Only objects smaller than this (diagonal, metres) can be opened as exits, so walls and floor always stay solid.")]
     public float maxExitSize = 4f;
+    [Tooltip("Names containing these words get their colliders switched off, so the doors and windows are real exits.")]
     public string[] openingNames = { "window", "door", "glass" };
 
     enum Phase { Intro, Title, Playing, Won }
@@ -56,12 +56,14 @@ public class GameFlow : MonoBehaviour
     RawImage videoImage;
     AspectRatioFitter videoFit;
     bool skipRequested;
+    GameHud hud;
 
     void Awake()
     {
         BuildBounds();
         OpenExits();
         BuildScreens();
+        hud = gameObject.AddComponent<GameHud>();
 
         StinkyThrower.Paused = true;
         if (introVideo == null) introVideo = Resources.Load<VideoClip>("IntroVideo");
@@ -173,6 +175,7 @@ public class GameFlow : MonoBehaviour
     {
         titleRoot.SetActive(false);
         ReleasePlush();
+        hud.SetVisible(true);
         phase = Phase.Playing;
         graceFrames = 2;                 // lets this click pass before throwing is allowed
         ShowCursor(false);
@@ -192,6 +195,7 @@ public class GameFlow : MonoBehaviour
         if (!outside) return;
 
         phase = Phase.Won;
+        hud.SetVisible(false);
         escapedAt = Time.time;
         StinkyThrower.Paused = true;     // no more throwing; the camera keeps watching her go
     }
@@ -208,6 +212,7 @@ public class GameFlow : MonoBehaviour
         if (thrower != null) thrower.ResetView();
 
         winRoot.SetActive(false);
+        hud.SetVisible(true);
         phase = Phase.Playing;
         graceFrames = 2;                 // this click must not also throw a stinky
         ShowCursor(false);

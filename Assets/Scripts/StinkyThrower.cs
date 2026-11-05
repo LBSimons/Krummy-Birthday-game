@@ -15,7 +15,7 @@ using UnityEngine.InputSystem;
 /// </summary>
 public class StinkyThrower : MonoBehaviour
 {
-    enum State { Aiming, Following, Returning }
+    enum State { Aiming, Following, Returning, FreeCam }
 
     [Header("References")]
     [Tooltip("Prefab of the small stinky model that gets thrown.")]
@@ -52,6 +52,11 @@ public class StinkyThrower : MonoBehaviour
     [Tooltip("Each stinky disappears this many seconds after being thrown. 0 = never.")]
     public float stinkyLifetime = 8f;
 
+    [Header("Free cam")]
+    public float freeCamSpeed = 3f;
+    public float freeCamFastMultiplier = 3f;
+    public float freeCamLookSpeed = 0.15f;
+
     [Header("Chase camera")]
     public float followDistance = 3.5f;
     public float followHeight = 1.2f;
@@ -79,6 +84,9 @@ public class StinkyThrower : MonoBehaviour
     Vector3 homePos, initHomePos;
     float initYaw, initPitch;
     float baseYaw, basePitch, yawOffset, pitchOffset;
+
+    float freeYaw, freePitch;
+    public bool IsFreeCam => state == State.FreeCam;
 
     Rigidbody followRb;
     bool followingModel;
@@ -180,6 +188,7 @@ public class StinkyThrower : MonoBehaviour
     {
         BouncyRoom.Pulse();
         if (pushable == null || pushable.Body == null) return;
+        if (state == State.FreeCam) return;   // player is looking around freely
 
         if (state == State.Following && followingModel)
         {
@@ -260,12 +269,14 @@ public class StinkyThrower : MonoBehaviour
 
     void Update()
     {
-        if (Paused) return;   // title card or win screen is showing
+        if (Paused || GameHud.MenuOpen) return;   // title card, win screen or settings menu is showing
+
+        if (state == State.FreeCam) { FreeCamUpdate(); return; }
 
         bool click = ClickPressed();
 
-        if (EscPressed()) LockCursor(false);
-        else if (click && Cursor.lockState == CursorLockMode.None) LockCursor(true);   // re-grab after Esc, and still throws
+        if (click && Cursor.lockState == CursorLockMode.None) LockCursor(true);
+        if (click && GameHud.PointerOverUi) click = false;   // that click was on a button
 
         if (state == State.Aiming)
         {
@@ -276,6 +287,62 @@ public class StinkyThrower : MonoBehaviour
         {
             StartReturn();      // click while chasing = skip back to first person
         }
+    }
+
+    public void ToggleFreeCam()
+    {
+        if (state == State.FreeCam)
+        {
+            StartReturn();                     // fly back to the player's spot
+            return;
+        }
+        followRb = null; followingModel = false;
+        Vector3 e = camT.eulerAngles;
+        freeYaw = e.y;
+        freePitch = e.x > 180f ? e.x - 360f : e.x;
+        state = State.FreeCam;
+        SetUi(false);
+    }
+
+    void FreeCamUpdate()
+    {
+        float dt = Time.unscaledDeltaTime;
+#if ENABLE_INPUT_SYSTEM
+        var m = Mouse.current; var k = Keyboard.current;
+        if (m != null && m.rightButton.isPressed)
+        {
+            Vector2 d = m.delta.ReadValue() * freeCamLookSpeed;
+            freeYaw += d.x; freePitch = Mathf.Clamp(freePitch - d.y, -89f, 89f);
+        }
+        Vector3 mv = Vector3.zero; bool fast = false;
+        if (k != null)
+        {
+            if (k.wKey.isPressed) mv += Vector3.forward;
+            if (k.sKey.isPressed) mv += Vector3.back;
+            if (k.dKey.isPressed) mv += Vector3.right;
+            if (k.aKey.isPressed) mv += Vector3.left;
+            if (k.eKey.isPressed) mv += Vector3.up;
+            if (k.qKey.isPressed) mv += Vector3.down;
+            fast = k.leftShiftKey.isPressed;
+        }
+#else
+        if (Input.GetMouseButton(1))
+        {
+            freeYaw += Input.GetAxis("Mouse X") * 3f; freePitch = Mathf.Clamp(freePitch - Input.GetAxis("Mouse Y") * 3f, -89f, 89f);
+        }
+        Vector3 mv = Vector3.zero;
+        if (Input.GetKey(KeyCode.W)) mv += Vector3.forward;
+        if (Input.GetKey(KeyCode.S)) mv += Vector3.back;
+        if (Input.GetKey(KeyCode.D)) mv += Vector3.right;
+        if (Input.GetKey(KeyCode.A)) mv += Vector3.left;
+        if (Input.GetKey(KeyCode.E)) mv += Vector3.up;
+        if (Input.GetKey(KeyCode.Q)) mv += Vector3.down;
+        bool fast = Input.GetKey(KeyCode.LeftShift);
+#endif
+        Quaternion rot = Quaternion.Euler(freePitch, freeYaw, 0f);
+        float speed = freeCamSpeed * (fast ? freeCamFastMultiplier : 1f);
+        Vector3 world = rot * new Vector3(mv.x, 0f, mv.z) + Vector3.up * mv.y;
+        camT.SetPositionAndRotation(camT.position + world * speed * dt, rot);
     }
 
     // The pointer is always live: where the mouse is on the screen decides where you aim,
@@ -455,6 +522,7 @@ public class StinkyThrower : MonoBehaviour
             case State.Aiming:    camT.SetPositionAndRotation(homePos, AimRotation); break;
             case State.Following: FollowCamera(); break;
             case State.Returning: ReturnCamera(); break;
+            case State.FreeCam:   break;
         }
     }
 

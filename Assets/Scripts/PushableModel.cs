@@ -95,6 +95,26 @@ public class PushableModel : MonoBehaviour
         stillTimer = 0f;
     }
 
+    /// <summary>Stands the plush upright again (lifted a little so she can't stay wedged).</summary>
+    public void StandUp()
+    {
+        Vector3 pos = Body.worldCenterOfMass;
+        Body.linearVelocity = Vector3.zero;
+        Body.angularVelocity = Vector3.zero;
+
+        // If she is far off to one side, also slide her a bit back towards the middle.
+        Vector3 toCentre = startPos - transform.position; toCentre.y = 0f;
+        Vector3 newPos = transform.position + Vector3.up * 0.6f;
+        if (toCentre.magnitude > 1.2f) newPos += toCentre.normalized * Mathf.Min(0.8f, toCentre.magnitude * 0.3f);
+
+        Body.position = newPos;
+        Body.rotation = startRot;
+        transform.SetPositionAndRotation(newPos, startRot);
+        Body.WakeUp();
+        lastHitTime = -100f;
+        stillTimer = 0f;
+    }
+
     void FixedUpdate()
     {
         // Watchdog: for a few seconds after any hit, if the plush stops moving away from the
@@ -156,8 +176,7 @@ public class PushableModel : MonoBehaviour
                                     c.GetContact(0).point, ForceMode.Impulse);
         }
 
-        lastHitTime = Time.time;
-        Unstick(false);
+        lastHitTime = Time.time;   // (no instant kick any more: it would fight the plush flying out of the room)
         if (stuckCheckDelay > 0f) { CancelInvoke(nameof(CheckStuck)); Invoke(nameof(CheckStuck), stuckCheckDelay); }
 
         HitByStinky?.Invoke(c);
