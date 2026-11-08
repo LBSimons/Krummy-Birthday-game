@@ -44,6 +44,22 @@ public class GameFlow : MonoBehaviour
     [Tooltip("Names containing these words get their colliders switched off, so the doors and windows are real exits.")]
     public string[] openingNames = { "window", "door", "glass" };
 
+    [Header("Ending (fade to black -> video -> fast credits -> game closes)")]
+    [Tooltip("Leave empty to use Assets/Resources/EndingVideo.mp4. If that is missing too, the intro video is used as a placeholder.")]
+    public VideoClip endingVideo;
+    [Tooltip("Credits scroll speed in pixels per second (1080p layout). Higher = faster.")]
+    public float creditsSpeed = 320f;
+    [Tooltip("Lines starting with # are big headings. Empty line = gap.")]
+    public string[] credits =
+    {
+        "# KRUMMY ESCAPES", "a birthday game", "",
+        "# Starring", "Scuffroll the Krum plush", "",
+        "# Throwing arm", "You", "",
+        "# Intro video", "Made by a very good friend", "",
+        "# Special thanks", "Everyone who threw a stinky", "The window", "",
+        "# Happy birthday!"
+    };
+
     enum Phase { Intro, Title, Playing, Won }
     Phase phase;
     GameObject titleRoot, winRoot;
@@ -56,7 +72,14 @@ public class GameFlow : MonoBehaviour
     RawImage videoImage;
     AspectRatioFitter videoFit;
     bool skipRequested;
+    bool endingStarted;
+    CanvasGroup creditsGroup;
+    RectTransform creditsText;
+    Text theEndText;
     GameHud hud;
+    TvScreen tvScreen;
+    GoalMarker goal;
+    MusicPlayer music;
 
     void Awake()
     {
@@ -64,6 +87,9 @@ public class GameFlow : MonoBehaviour
         OpenExits();
         BuildScreens();
         hud = gameObject.AddComponent<GameHud>();
+        tvScreen = gameObject.AddComponent<TvScreen>();
+        goal = gameObject.AddComponent<GoalMarker>();
+        music = gameObject.AddComponent<MusicPlayer>();
 
         StinkyThrower.Paused = true;
         if (introVideo == null) introVideo = Resources.Load<VideoClip>("IntroVideo");
@@ -161,12 +187,11 @@ public class GameFlow : MonoBehaviour
                 break;
 
             case Phase.Won:
-                if (Time.time - escapedAt > winDelay && !winRoot.activeSelf)
+                if (!endingStarted && Time.time - escapedAt > winDelay)
                 {
-                    winRoot.SetActive(true);
-                    ShowCursor(true);
+                    endingStarted = true;
+                    StartCoroutine(EndingRoutine());
                 }
-                if (winRoot.activeSelf && (ClickPressed() || RPressed())) Restart();
                 break;
         }
     }
@@ -176,6 +201,9 @@ public class GameFlow : MonoBehaviour
         titleRoot.SetActive(false);
         ReleasePlush();
         hud.SetVisible(true);
+        tvScreen.Begin();                // the TV switches on when the game starts
+        goal.SetVisible(true);           // red circle + arrows on the window
+        music.Play();
         phase = Phase.Playing;
         graceFrames = 2;                 // lets this click pass before throwing is allowed
         ShowCursor(false);
@@ -195,6 +223,8 @@ public class GameFlow : MonoBehaviour
         if (!outside) return;
 
         phase = Phase.Won;
+        music.Stop();
+        goal.SetVisible(false);
         hud.SetVisible(false);
         escapedAt = Time.time;
         StinkyThrower.Paused = true;     // no more throwing; the camera keeps watching her go
@@ -212,10 +242,102 @@ public class GameFlow : MonoBehaviour
         if (thrower != null) thrower.ResetView();
 
         winRoot.SetActive(false);
+        endingStarted = false;
         hud.SetVisible(true);
+        goal.SetVisible(true);
+        music.Play();
         phase = Phase.Playing;
         graceFrames = 2;                 // this click must not also throw a stinky
         ShowCursor(false);
+    }
+
+    // ------------------------------------------------------------ ending
+
+    IEnumerator EndingRoutine()
+    {
+        ShowCursor(false);
+        yield return Fade(blackGroup, 0f, 1f, fadeToBlackTime);
+
+        var clip = endingVideo != null ? endingVideo : Resources.Load<VideoClip>("EndingVideo");
+        if (clip == null) clip = introVideo;           // placeholder until the real ending video exists
+        if (clip != null) yield return PlayClip(clip);
+
+        // credits
+        videoGroup.gameObject.SetActive(false);
+        creditsGroup.gameObject.SetActive(true);
+        creditsGroup.alpha = 1f;
+        theEndText.gameObject.SetActive(false);
+        blackGroup.alpha = 0f;
+        music.Play();
+
+        Canvas.ForceUpdateCanvases();
+        LayoutRebuilder.ForceRebuildLayoutImmediate(creditsText);
+        float h = creditsText.rect.height;
+        float y = -1080f;
+        while (y < h)
+        {
+            y += creditsSpeed * Time.unscaledDeltaTime;
+            creditsText.anchoredPosition = new Vector2(0f, y);
+            yield return null;
+        }
+
+        theEndText.gameObject.SetActive(true);
+        yield return new WaitForSecondsRealtime(3f);
+        music.Stop();
+        yield return Fade(blackGroup, 0f, 1f, 1.2f);
+        creditsGroup.gameObject.SetActive(false);
+        Debug.Log("GameFlow: the end. Closing the game.");
+#if UNITY_EDITOR
+        UnityEditor.EditorApplication.isPlaying = false;
+#else
+        Application.Quit();
+#endif
+    }
+
+    // Plays a clip full screen on the video screen. Click skips it.
+    IEnumerator PlayClip(VideoClip clip)
+    {
+        skipRequested = false;
+        var vp = gameObject.AddComponent<VideoPlayer>();
+        var rt = new RenderTexture(Mathf.Max(16, (int)clip.width), Mathf.Max(16, (int)clip.height), 0);
+        vp.playOnAwake = false; vp.isLooping = false; vp.clip = clip;
+        vp.renderMode = VideoRenderMode.RenderTexture; vp.targetTexture = rt;
+        vp.audioOutputMode = VideoAudioOutputMode.Direct;
+        bool ended = false, failed = false;
+        vp.loopPointReached += _ => ended = true;
+        vp.errorReceived += (_, msg) => { Debug.LogWarning("GameFlow: ending video problem: " + msg); if (!vp.isPlaying) failed = true; };
+        vp.Prepare();
+
+        float wait = 0f;
+        while (!vp.isPrepared && !failed && wait < 8f) { wait += Time.unscaledDeltaTime; yield return null; }
+
+        if (vp.isPrepared && !failed)
+        {
+            videoImage.texture = rt;
+            videoFit.aspectRatio = (float)clip.width / Mathf.Max(1f, (float)clip.height);
+            videoGroup.alpha = 1f;
+            videoGroup.gameObject.SetActive(true);
+            blackGroup.alpha = 0f;
+            vp.Play();
+            float t = 0f, stoppedFor = 0f;
+            yield return null;
+            while (!failed && t < 1800f)
+            {
+                t += Time.unscaledDeltaTime;
+                if (t > 1f && ClickPressed()) break;
+                if (t > 1f)
+                {
+                    stoppedFor = vp.isPlaying ? 0f : stoppedFor + Time.unscaledDeltaTime;
+                    if (ended || stoppedFor > 0.75f) break;
+                }
+                yield return null;
+            }
+        }
+        vp.Stop();
+        videoGroup.alpha = 0f;
+        Destroy(vp);
+        rt.Release();
+        Destroy(rt);
     }
 
     // ------------------------------------------------------------ intro video
@@ -253,18 +375,22 @@ public class GameFlow : MonoBehaviour
             blackGroup.alpha = 0f;           // the video screen is black around the picture anyway
             vp.Play();
 
-            float t = 0f, limit = (float)introVideo.length + 3f;
+            // Don't trust the clip's reported length (Unity can report it wrongly): just play until the
+            // player says it is finished, or it has really stopped.
+            float t = 0f, stoppedFor = 0f;
+            const float hardLimit = 600f;
             yield return null;
-            float len = (float)introVideo.length;
-            while (!failed && !skipRequested && t < limit)
+            while (!failed && !skipRequested && t < hardLimit)
             {
                 t += Time.unscaledDeltaTime;
-                // finished = the event fired, or the clip is past its length and has stopped
-                if (ended && t > len * 0.9f) break;
-                if (t > len + 0.5f && !vp.isPlaying) break;
+                if (t > 1f)
+                {
+                    stoppedFor = vp.isPlaying ? 0f : stoppedFor + Time.unscaledDeltaTime;
+                    if (ended || stoppedFor > 0.75f) break;
+                }
                 yield return null;
             }
-            Debug.Log("GameFlow: intro video finished after " + t.ToString("0.0") + "s of " + len.ToString("0.0") + "s");
+            Debug.Log("GameFlow: intro video finished after " + t.ToString("0.0") + "s (clip says " + introVideo.length.ToString("0.0") + "s, player says " + vp.length.ToString("0.0") + "s, ended event: " + ended + ", skipped: " + skipRequested + ")");
         }
         vp.Stop();
 
@@ -333,6 +459,40 @@ public class GameFlow : MonoBehaviour
         videoFit.aspectMode = AspectRatioFitter.AspectMode.FitInParent;
         videoFit.aspectRatio = 16f / 9f;
         vRoot.SetActive(false);
+
+        // Credits screen (black, text scrolls up).
+        var cRoot = new GameObject("Credits Screen", typeof(RectTransform));
+        cRoot.transform.SetParent(canvasGO.transform, false);
+        Stretch((RectTransform)cRoot.transform);
+        var cBg = cRoot.AddComponent<Image>(); cBg.color = Color.black; cBg.raycastTarget = false;
+        creditsGroup = cRoot.AddComponent<CanvasGroup>(); creditsGroup.blocksRaycasts = false;
+        var ctGO = new GameObject("Credits Text", typeof(RectTransform));
+        ctGO.transform.SetParent(cRoot.transform, false);
+        var ct = ctGO.AddComponent<Text>();
+        ct.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+        ct.supportRichText = true; ct.alignment = TextAnchor.UpperCenter; ct.color = Color.white;
+        ct.fontSize = 56; ct.lineSpacing = 1.2f; ct.raycastTarget = false;
+        var sb = new System.Text.StringBuilder();
+        foreach (var line in credits)
+        {
+            if (line.StartsWith("#")) sb.Append("<size=88><b><color=#FFD966>").Append(line.TrimStart('#', ' ')).Append("</color></b></size>\n");
+            else sb.Append(line).Append('\n');
+        }
+        ct.text = sb.ToString();
+        creditsText = ct.rectTransform;
+        creditsText.anchorMin = new Vector2(0.5f, 1f); creditsText.anchorMax = new Vector2(0.5f, 1f);
+        creditsText.pivot = new Vector2(0.5f, 1f);
+        creditsText.sizeDelta = new Vector2(1400f, 100f);
+        var fit = ctGO.AddComponent<ContentSizeFitter>();
+        fit.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+        var endGO = new GameObject("The End", typeof(RectTransform));
+        endGO.transform.SetParent(cRoot.transform, false);
+        theEndText = endGO.AddComponent<Text>();
+        theEndText.font = ct.font; theEndText.text = "THE END"; theEndText.fontSize = 150; theEndText.fontStyle = FontStyle.Bold;
+        theEndText.color = new Color(1f, 0.85f, 0.4f); theEndText.alignment = TextAnchor.MiddleCenter; theEndText.raycastTarget = false;
+        Stretch(theEndText.rectTransform);
+        endGO.SetActive(false);
+        cRoot.SetActive(false);
 
         // Plain black sheet used for the fade-to-black (on top of everything).
         var bRoot = new GameObject("Fade Black", typeof(RectTransform));
